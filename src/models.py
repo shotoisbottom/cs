@@ -1,7 +1,5 @@
 import tensorflow as tf
 
-import tensorflow as tf
-
 class CBAM(tf.keras.layers.Layer):
     def __init__(self, trainable=True , filter_num = [3,3,3] ,reduction_ratio = 8 , stride = 1, name = "CBAM" , *args, **kwargs,):
         super(CBAM,self).__init__(trainable, name, *args, **kwargs)
