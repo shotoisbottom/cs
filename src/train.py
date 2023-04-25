@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 import configparser
 import json
-import cv2
+import time
 
 from models import UnetProMax as Net
 from data import IOdata
@@ -23,43 +23,13 @@ shape = json.loads(config.get('Data', 'shape'))
 data_dir = config.get('Data', 'data_dir')
 save_dir = config.get('Data', 'save_dir')
 
-trainData = IOdata(data_dir, batchs_size=batch_size, dirname='inputs')
+trainData = IOdata(data_dir, batchs_size=batch_size, label=True, dirname='inputs')
 valData = IOdata(data_dir, batchs_size=1, dirname='val')
 
-def preprocess_image(image, input_size):
-    image = cv2.resize(image, (input_size, input_size))
-    image = np.float32(image)
-    image /= 255.0
-    image = np.expand_dims(image, axis=0)
-    return image
-
-def post_process_output(predictions, anchors, classes, input_size, image_size, conf_thresh=0.25, iou_thresh=0.45):
-    # Post-processing code goes here
-    pass
 
 def evaluate_yolov5_accuracy(yolo_model, test_data, ground_truth_labels):
-    # Initialize counters
-    total_predictions = 0
-    correct_predictions = 0
-    
-    # Iterate through test images and ground truth labels
-    for image, ground_truth in zip(test_data, ground_truth_labels):
-        # Preprocess the image
-        preprocessed_image = preprocess_image(image, shape)
-        
-        # Run inference
-        predictions = yolo_model(preprocessed_image)
-        
-        # Post-process the output to obtain the predicted bounding boxes and class labels
-        boxes, scores, classes = post_process_output(predictions, anchors, classes, shape, image.shape[:2])
-        
-        # Calculate recognition accuracy
-        # ...
-        # Update total_predictions and correct_predictions counters based on your comparison of predictions and ground_truth
-        
-    # Calculate and return recognition accuracy
-    accuracy = correct_predictions / total_predictions
-    return accuracy
+    pred_label = yolo_model(test_data)
+    return tf.keras.metrics.binary_accuracy(pred_label, ground_truth_labels)
 
 
 model = Net(name=network_name)
@@ -69,14 +39,44 @@ model.compile(
     metrics=tf.image.psnr
     )
 model.build(input_shape=[batch_size, shape[0], shape[1], shape[2]])
+optimizer = tf.keras.optimizers.Adam(learning_rate=init_rate)
+model.summary(print_fn=print)
 
-detect = tf.keras.models.load_model()
+detect = tf.keras.models.load_model(config.get('TeacherNet', 'path'))
+
+def loss_object(x=None, y=None, label=None):
+    loss = tf.keras.losses.mae(x,y)
+    if label == None:
+        return loss
+    else:
+        return loss*evaluate_yolov5_accuracy(yolo_model=detect, test_data=x, ground_truth_labels=label)
+
+def train_step(x=None, y=None, label=None):
+    with tf.GradientTape() as tape:
+        pred = model(x,training=True)
+        loss = loss_object(pred,y,label)
+    gradients = tape.gradient(loss, model.trainable_variables)
+    #print(gradients)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return pred, tf.reduce_mean(loss)
+
+def evaluate_step(x=None, y=None):
+    pred = model(x,training=False)
+    loss = loss_object(pred,y)
+    return pred, tf.reduce_mean(loss)
 
 for _ in range(num_epochs):
-    x,y = trainData()
-    x,y = data_resize(x, y, shape=[shape[0], shape[1]])
-    model.fit(x, y, batch_size=batch_size, epochs=1)
+    for batch in range(0,trainData.getsize()//batch_size): 
+        x,y,l = trainData.imageAndLabel()
+        x,y = data_resize(x, y, shape=[shape[0], shape[1]])
+        l = tf.concat(l,axis=-1)
+        pred, loss = train_step(x, y, l)
+        print("train_step loss: %d"%(loss))
 
     x,y = valData()
     x,y = data_resize(x, y, shape=[shape[0], shape[1]])
-    model.evaluate(x, y, batch_size=1)
+    pred, loss = evaluate_step(x, y)
+    print("epoch %d/%d, loss: %d"%(_, num_epochs, loss))
+
+end_time = time.strftime('%m%d_%H%M%S', time.localtime())
+model.save_weights("weights"+str(end_time)+".h5")
